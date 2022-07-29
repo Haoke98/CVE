@@ -1,0 +1,6 @@
+/CVE-2017-7921/record/
+*.zip
+/CVE-2017-7921/glory/
+/CVE-2017-7921/targets/
+test.py
+/secret.py
