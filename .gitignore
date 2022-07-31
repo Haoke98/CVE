@@ -4,3 +4,4 @@
 /CVE-2017-7921/targets/
 test.py
 /secret.py
+.idea
